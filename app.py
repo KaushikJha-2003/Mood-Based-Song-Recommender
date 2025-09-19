@@ -1,119 +1,66 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from huggingface_hub import InferenceClient
 from sklearn.metrics.pairwise import cosine_similarity
-from sentence_transformers import SentenceTransformer
-import requests
-from io import StringIO
-
-
-# Environment Setup
-
+from modules.emotion import get_emotion
+from modules.recommend import recommend_playlist
+from modules.visualizations import show_mood_chart, show_tsne
 from dotenv import load_dotenv
-load_dotenv()
-
-
-# Background Styling
-
-st.markdown("""
-<style>
-.stApp{
-    background-image: url("https://images.unsplash.com/photo-1458560871784-56d23406c091?q=80&w=1974&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D");
-    background-size: cover;
-    background-position: center;
-    background-attachment: fixed;
-    opacity: 0.9;
-}
-</style>
-""", unsafe_allow_html=True)  
-
-  
-# HuggingFace Setup
-
 import os
-HF_TOKEN = os.getenv("HF_TOKEN")
-client = InferenceClient(token=HF_TOKEN)
 
-
-## Loading the lyrics through a GitHub
-
-
+# --- ENV SETUP ---
+load_dotenv()
+# --- Data ---
+@st.cache_data
 def load_lyrics():
-    url = "https://raw.githubusercontent.com/walkerkq/musiclyrics/master/billboard_lyrics_1964-2015.csv"
-    
-    try:
-        response = requests.get(url)
-        df = pd.read_csv(StringIO(response.text))
-        
-        df = df.rename(columns={"Lyrics": "lyrics", "Artist": "artist", "Song": "title"})
-        df = df[['title','artist','lyrics']].dropna()
-        
-        df['mood'] = np.random.choice(['positive', 'neutral', 'negative'], size=len(df))
-        
-        return df.head(100)  
-        
-    except Exception as e:
-        st.error(f"Using fallback dataset because: {str(e)}")
-        return pd.DataFrame([
-            {"title": "Happy", "artist": "Pharrell Williams", "lyrics": "Clap along...", "mood": "positive", "genre": "pop"},
-            {"title": "Yesterday", "artist": "The Beatles", "lyrics": "All my troubles...", "mood": "negative", "genre": "rock"},
-            {"title": "Blinding Lights", "artist": "The Weeknd", "lyrics": "I've been tryna...", "mood": "neutral", "genre": "electronic"}
-        ])
-
+    df = pd.read_csv("data/lyrics.csv")
+    return df
 lyrics_db = load_lyrics()
 
+# --- Session ---
+if "history" not in st.session_state: st.session_state.history = []
+if "ratings" not in st.session_state: st.session_state.ratings = {}
+if "last_playlist" not in st.session_state: st.session_state.last_playlist = pd.DataFrame()
 
-
-
-# Embedding Model 
-
-def load_embedding_model():
-    return SentenceTransformer('all-MiniLM-L6-v2')
-
-model = load_embedding_model()
-lyrics_embeddings = model.encode(lyrics_db['lyrics'].tolist())
- 
-
-
-
-# Recommendation Function 
-
-def recommend_songs(user_input, n=3):
-    sentiment = client.text_classification(text=user_input)
-    mood = sentiment[0]['label'].lower()
-    
-    mood_matches = lyrics_db[lyrics_db["mood"] == mood]
-    if len(mood_matches) == 0:
-        return lyrics_db.sample(min(n, len(lyrics_db)))
-    
-    input_embedding = model.encode([user_input])
-    mood_matches = mood_matches.reset_index(drop=True)
-    similarities = cosine_similarity(input_embedding, lyrics_embeddings[mood_matches.index])[0]
-
-    top_indices = np.argsort(similarities)[-n:][::-1]
-    return mood_matches.iloc[top_indices]
-
-
-
-
-
-# --- Streamlit UI ---
-st.title("Mood-Based Song Recommender")
+# --- UI ---
+st.title("🎵 Mood-Based Music Recommender (Advanced)")
+artist = st.sidebar.selectbox("Filter by Artist", ["All"] + sorted(lyrics_db['Artist'].unique()))
+year = st.sidebar.selectbox("Filter by Year", ["All"] + sorted(lyrics_db['Year'].unique()))
 user_input = st.text_input("How are you feeling today?", "I feel joyful")
+playlist_size = st.slider("Playlist Size", 3, 15, 5)
+activity = st.selectbox("Activity Type", ['chill','study','party','focus'])
 
-
-if st.button("Get Recommendations"):
-    recommendations = recommend_songs(user_input, n=3)
+if st.button("Get My Playlist!"):
+    emotion = get_emotion(user_input)
+    playlist = recommend_playlist(user_input, lyrics_db, playlist_size, artist, year, activity, emotion)
     
-
-    st.subheader("Top Recommendations:")
-    cols = st.columns(3)
-    for i, (_, row) in enumerate(recommendations.iterrows()):
-
-        with cols[i]:
-            st.write(f"{row['title']} by {row['artist']}")
-            yt_link = f"https://www.youtube.com/results?search_query={row['title']}+{row['artist']}"
+    if playlist.empty:
+        st.warning("No songs found with the selected filters. Try different filter options.")
+    else:
+        st.session_state.last_playlist = playlist
+        st.session_state.history.extend(playlist['Song'].tolist())
+        for idx,row in playlist.iterrows():
+            st.write(f"**{row['Song']}** by *{row['Artist']}* | Year: {row['Year']}, Tempo: {row['tempo']}, Energy: {row['energy']}")
+            yt_link = f"https://www.youtube.com/results?search_query={row['Song']}+{row['Artist']}"
             st.markdown(f'<a href="{yt_link}" target="_blank">▶ Play on YouTube</a>',unsafe_allow_html=True)
+            col1, col2 = st.columns(2)
+            if col1.button(f"👍 Like {row['Song']}", key=f"up_{idx}"): st.session_state.ratings[row['Song']] = 1
+            if col2.button(f"👎 Dislike {row['Song']}", key=f"down_{idx}"): st.session_state.ratings[row['Song']] = -1
 
+st.header("Listening History")
+st.write(", ".join(st.session_state.history[-20:]))
 
+if not st.session_state.last_playlist.empty:
+    st.header("Playlist Mood Analysis")
+    show_mood_chart(st.session_state.last_playlist)
+    show_tsne(st.session_state.last_playlist)
+
+with st.expander("See Project Technical Summary 🚩"):
+    st.markdown("""
+    - Multi-modal mood & emotion detection
+    - Genre/language filters & activity-aware playlisting
+    - Spotify audio feature integration
+    - User feedback and evolving recommendations
+    - Advanced visualizations
+    - Container-ready; CI/CD enabled
+    """)

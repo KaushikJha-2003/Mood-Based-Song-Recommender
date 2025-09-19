@@ -1,4 +1,9 @@
 streamlit
 transformers
-huggingface_hub 
+sentence-transformers
+scikit-learn
+spotipy
 python-dotenv
+matplotlib
+pandas
+numpy
